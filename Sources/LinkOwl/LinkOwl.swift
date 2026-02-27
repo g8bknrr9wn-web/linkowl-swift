@@ -3,45 +3,103 @@ import os.log
 
 /// LinkOwl — attribution tracking for indie iOS developers.
 ///
-/// Usage:
+/// **One line to set up:**
 /// ```swift
-/// // 1. Configure on app launch
-/// LinkOwl.configure(apiKey: "lo_live_xxxx")
+/// LinkOwl.start("lo_live_xxxx")
+/// ```
 ///
-/// // 2. Track install (call once, SDK deduplicates)
-/// LinkOwl.trackInstall()
-///
-/// // 3. Set RevenueCat user ID for purchase attribution
+/// **With RevenueCat:**
+/// ```swift
+/// LinkOwl.start("lo_live_xxxx")
 /// LinkOwl.setUserId(Purchases.shared.appUserID)
+/// ```
 ///
-/// // 4. (Optional) Manual purchase tracking if not using RevenueCat webhook
-/// LinkOwl.trackPurchase(transactionId: "txn_abc", revenue: 4.99, currency: "GBP")
+/// **With Superwall:**
+/// ```swift
+/// LinkOwl.start("lo_live_xxxx")
+/// LinkOwl.setUserId(Superwall.shared.userId)
 /// ```
 public enum LinkOwl {
     
     private static let logger = Logger(subsystem: "app.linkowl.sdk", category: "main")
+    private static var hasStarted = false
     
-    /// Configure LinkOwl with your API key. Call once on app startup.
+    // MARK: - Public API
+    
+    /// Start LinkOwl. Configures and tracks the install in one call.
     ///
-    /// - Parameters:
-    ///   - apiKey: Your LinkOwl API key (starts with `lo_live_`)
-    ///   - baseURL: Override the API base URL (default: `https://linkowl.app`). For testing only.
-    public static func configure(apiKey: String, baseURL: String? = nil) {
-        Configuration.shared.configure(apiKey: apiKey, baseURL: baseURL)
-        logger.debug("LinkOwl configured")
+    /// Call once on app launch (in your App init or AppDelegate).
+    /// Safe to call multiple times — only fires once.
+    ///
+    /// - Parameter apiKey: Your API key from linkowl.app (starts with `lo_live_`)
+    public static func start(_ apiKey: String) {
+        guard !hasStarted else { return }
+        hasStarted = true
+        
+        Configuration.shared.configure(apiKey: apiKey)
+        logger.debug("LinkOwl started")
+        trackInstall()
     }
     
-    /// Track an app install. Safe to call multiple times — only fires once.
+    /// Link a RevenueCat or Superwall user ID for purchase attribution.
     ///
-    /// Collects a privacy-safe fingerprint (no IDFA/IDFV) and sends it to the
-    /// LinkOwl API for attribution matching. Runs in the background and never
-    /// blocks the main thread or crashes your app.
-    public static func trackInstall() {
+    /// Call after your paywall SDK is configured:
+    /// ```swift
+    /// LinkOwl.setUserId(Purchases.shared.appUserID)
+    /// ```
+    ///
+    /// - Parameter userId: The user ID from your paywall provider
+    public static func setUserId(_ userId: String) {
         guard Configuration.shared.isConfigured else {
-            logger.warning("trackInstall called before configure(). Ignoring.")
+            logger.warning("setUserId called before start(). Ignoring.")
             return
         }
         
+        Storage.shared.userId = userId
+        
+        guard let installId = Storage.shared.installId else {
+            logger.debug("No install_id yet. userId stored, will send later.")
+            return
+        }
+        
+        Task.detached(priority: .utility) {
+            await APIClient.shared.setUserId(userId, installId: installId)
+        }
+    }
+    
+    /// Manually track a purchase. Only if NOT using RevenueCat/Superwall webhooks.
+    ///
+    /// - Parameters:
+    ///   - transactionId: Unique transaction ID
+    ///   - revenue: Amount (e.g. 4.99)
+    ///   - currency: ISO 4217 code (e.g. "GBP")
+    public static func trackPurchase(transactionId: String, revenue: Double, currency: String) {
+        guard Configuration.shared.isConfigured else {
+            logger.warning("trackPurchase called before start(). Ignoring.")
+            return
+        }
+        
+        let installId = Storage.shared.installId
+        
+        Task.detached(priority: .utility) {
+            await APIClient.shared.trackPurchase(
+                installId: installId,
+                transactionId: transactionId,
+                revenue: revenue,
+                currency: currency
+            )
+        }
+    }
+    
+    // MARK: - Internal (used by start)
+    
+    /// Configure without tracking. Use `start()` instead.
+    internal static func configure(apiKey: String, baseURL: String? = nil) {
+        Configuration.shared.configure(apiKey: apiKey, baseURL: baseURL)
+    }
+    
+    internal static func trackInstall() {
+        guard Configuration.shared.isConfigured else { return }
         guard !Storage.shared.isInstallTracked else {
             logger.debug("Install already tracked. Skipping.")
             return
@@ -55,56 +113,6 @@ public enum LinkOwl {
             }
             Storage.shared.installId = installId
             Storage.shared.isInstallTracked = true
-        }
-    }
-    
-    /// Set the RevenueCat user ID to enable automatic purchase attribution via webhook.
-    ///
-    /// Call this after RevenueCat is configured:
-    /// ```swift
-    /// LinkOwl.setUserId(Purchases.shared.appUserID)
-    /// ```
-    ///
-    /// - Parameter userId: The RevenueCat `appUserID`
-    public static func setUserId(_ userId: String) {
-        guard Configuration.shared.isConfigured else {
-            logger.warning("setUserId called before configure(). Ignoring.")
-            return
-        }
-        
-        Storage.shared.userId = userId
-        
-        guard let installId = Storage.shared.installId else {
-            logger.debug("No install_id yet. userId stored locally, will be sent with next install.")
-            return
-        }
-        
-        Task.detached(priority: .utility) {
-            await APIClient.shared.setUserId(userId, installId: installId)
-        }
-    }
-    
-    /// Manually track a purchase. Use this only if you're NOT using the RevenueCat webhook.
-    ///
-    /// - Parameters:
-    ///   - transactionId: Unique transaction identifier
-    ///   - revenue: Purchase amount (e.g. 4.99)
-    ///   - currency: ISO 4217 currency code (e.g. "GBP", "USD")
-    public static func trackPurchase(transactionId: String, revenue: Double, currency: String) {
-        guard Configuration.shared.isConfigured else {
-            logger.warning("trackPurchase called before configure(). Ignoring.")
-            return
-        }
-        
-        let installId = Storage.shared.installId
-        
-        Task.detached(priority: .utility) {
-            await APIClient.shared.trackPurchase(
-                installId: installId,
-                transactionId: transactionId,
-                revenue: revenue,
-                currency: currency
-            )
         }
     }
 }
