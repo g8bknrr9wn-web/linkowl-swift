@@ -15,7 +15,10 @@ let package = Package(
     targets: [
         .target(
             name: "LinkOwl",
-            path: "Sources/LinkOwl"
+            path: "Sources/LinkOwl",
+            resources: [
+                .copy("PrivacyInfo.xcprivacy")
+            ]
         ),
         .testTarget(
             name: "LinkOwlTests",
